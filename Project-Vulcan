@@ -1,0 +1,472 @@
+"""
+PROJECT VULCAN: SPH4U EDITION
+Gravitational simulation demonstrating Newtonian vs Einsteinian mechanics.
+"""
+
+import pygame
+import matplotlib.pyplot as plt
+import sys
+import math
+import random
+
+FPS = 60
+
+G = 1.0
+M = 100.0
+m = 1.0
+R = 180.0
+V = math.sqrt(G * M / R)
+
+dt_base = 0.01
+speeds = [0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+spd_idx = 2
+
+correction = 0.05
+amp = 100.0
+mercury = False
+overlay = False
+show_ui = True
+
+t = 0.0
+orbits = 0
+angle = 0.0
+init_angle = None
+last_angle = None
+last_d = float('inf')
+going_in = True
+
+def time_str(st):
+    days = st * 1.0
+    years = days / 365.25
+    if years >= 1.0:
+        return f"{years:.1f} years"
+    elif days >= 30:
+        return f"{days / 30.0:.1f} months" 
+    else:
+        return f"{days:.1f} days"
+
+def get_corr():
+    if mercury:
+        return 0.0000001
+    else:
+        return correction * amp
+
+class Body:
+    def __init__(self, x, y, vx, vy, mass, color, name):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.m = mass
+        self.c = color
+        self.n = name
+        self.trail = []
+
+def make_stars(num, w, h):
+    s = []
+    for _ in range(num):
+        x = random.randint(0, w)
+        y = random.randint(100, h - 100)
+        b = random.randint(80, 200)
+        s.append((x, y, b))
+    return s
+
+def draw_stars(scr, stars):
+    for x, y, b in stars:
+        pygame.draw.circle(scr, (b, b, b + 30), (x, y), 1)
+
+def draw_bg(scr, r):
+    for y in range(r.height):
+        i = int(12 + 18 * (1 - y / r.height))
+        pygame.draw.line(scr, (i//2, i//2, i), (r.x, r.y + y), (r.x + r.width, r.y + y))
+
+def draw_star(scr, x, y, col):
+    for i in range(3, 0, -1):
+        a = 50 - i * 12
+        gc = tuple(min(255, k + a) for k in col)
+        pygame.draw.circle(scr, gc, (x, y), 22 + i * 3, 2)
+    pygame.draw.circle(scr, col, (x, y), 22)
+    pygame.draw.circle(scr, (255, 255, 255), (x, y), 14)
+    pygame.draw.circle(scr, col, (x, y), 9)
+
+def draw_trail(scr, tr, col, ox, oy):
+    if len(tr) < 2: return
+    for i in range(1, len(tr)):
+        x1 = int(tr[i-1][0] + ox)
+        y1 = int(tr[i-1][1] + oy)
+        x2 = int(tr[i][0] + ox)
+        y2 = int(tr[i][1] + oy)
+        pygame.draw.line(scr, col, (x1, y1), (x2, y2), 4)
+
+def draw_body(scr, b, ox, oy):
+    sx = int(b.x + ox)
+    sy = int(b.y + oy)
+    draw_trail(scr, b.trail, b.c, ox, oy)
+    
+    for i in range(4, 0, -1):
+        a = 40 - i * 10
+        gc = tuple(max(0, min(255, k + a)) for k in b.c)
+        pygame.draw.circle(scr, gc, (sx, sy), 9 + i * 2)
+        
+    pygame.draw.circle(scr, b.c, (sx, sy), 12)
+    pygame.draw.circle(scr, (255, 255, 255), (sx - 3, sy - 3), 4)
+
+def draw_grid(scr, cx):
+    for i, x in enumerate(range(0, 800, 50)):
+        a = 25 + 8 * (i % 2)
+        pygame.draw.line(scr, (a, a, a + 15), (cx - 400 + x, 100), (cx - 400 + x, 700), 1)
+    for i, y in enumerate(range(100, 700, 50)):
+        a = 25 + 8 * (i % 2)
+        pygame.draw.line(scr, (a, a, a + 15), (cx - 400, y), (cx + 400, y), 1)
+
+def draw_box(scr, x, y, w, h):
+    s = pygame.Surface((w, h))
+    s.set_alpha(180)
+    s.fill((10, 10, 20))
+    scr.blit(s, (x, y))
+    pygame.draw.rect(scr, (60, 60, 80), (x, y, w, h), 1)
+
+class Graph:
+    def __init__(self):
+        self.times = []
+        self.kes = []
+        self.pes = []
+        self.tes = []
+        
+        plt.ion()
+        self.fig, self.ax = plt.subplots(figsize=(10, 6))
+        self.fig.canvas.manager.set_window_title('Energy Conservation Monitor')
+        self.fig.patch.set_facecolor('#1a1a2e')
+        self.ax.set_facecolor('#16213e')
+        
+        self.l1, = self.ax.plot([], [], 'c-', label='Kinetic Energy', linewidth=2)
+        self.l2, = self.ax.plot([], [], 'm-', label='Potential Energy', linewidth=2)
+        self.l3, = self.ax.plot([], [], 'y-', label='Total Energy', linewidth=3)
+        
+        self.ax.set_xlabel('Time', fontsize=12, color='white')
+        self.ax.set_ylabel('Energy', fontsize=12, color='white')
+        self.ax.set_title('Conservation of Mechanical Energy', fontsize=14, fontweight='bold', color='white')
+        self.ax.legend(loc='upper right', facecolor='#1a1a2e', edgecolor='white', labelcolor='white', framealpha=1.0)
+        self.ax.grid(True, alpha=0.3, color='white')
+        self.ax.tick_params(colors='white')
+        self.ax.set_xlim(0, 100)
+        self.ax.set_ylim(-150, 150)
+        plt.tight_layout()
+    
+    def update(self, time, body, sun):
+        ke = 0.5 * body.m * (body.vx**2 + body.vy**2)
+        dx = body.x - sun.x
+        dy = body.y - sun.y
+        d = math.sqrt(dx**2 + dy**2)
+        pe = -G * sun.m * body.m / d if d > 0 else 0
+        e = ke + pe
+        
+        self.times.append(time)
+        self.kes.append(ke)
+        self.pes.append(pe)
+        self.tes.append(e)
+        
+        if len(self.times) > 300:
+            self.times.pop(0)
+            self.kes.pop(0)
+            self.pes.pop(0)
+            self.tes.pop(0)
+        
+        self.l1.set_data(self.times, self.kes)
+        self.l2.set_data(self.times, self.pes)
+        self.l3.set_data(self.times, self.tes)
+        
+        if len(self.times) > 1:
+            self.ax.set_xlim(self.times[0], self.times[-1] + 10)
+            vals = self.kes + self.pes + self.tes
+            if vals:
+                r = max(vals) - min(vals)
+                mg = r * 0.1 + 10
+                self.ax.set_ylim(min(vals) - mg, max(vals) + mg)
+        
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
+pygame.init()
+screen = pygame.display.set_mode((1600, 800))
+pygame.display.set_caption("Project Vulcan")
+clock = pygame.time.Clock()
+
+f1 = pygame.font.Font(None, 56)
+f2 = pygame.font.Font(None, 28)
+f3 = pygame.font.Font(None, 24)
+f4 = pygame.font.Font(None, 20)
+
+sun = Body(0, 0, 0, 0, M, (255, 240, 100), "Star")
+p1 = Body(R, 0, 0, V, m, (100, 180, 255), "Newton")
+p2 = Body(R, 0, 0, V, m, (255, 80, 120), "Einstein")
+
+stars_left = make_stars(150, 800, 800)
+stars_right = make_stars(150, 800, 800)
+
+graph = Graph()
+running = True
+paused = False
+
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_SPACE:
+                paused = not paused
+            elif event.key == pygame.K_r:
+                sun = Body(0, 0, 0, 0, M, (255, 240, 100), "Star")
+                p1 = Body(R, 0, 0, V, m, (100, 180, 255), "Newton")
+                p2 = Body(R, 0, 0, V, m, (255, 80, 120), "Einstein")
+                t = 0.0
+                orbits = 0
+                angle = 0.0
+                init_angle = None
+                last_angle = None
+                
+            elif event.key == pygame.K_c:
+                p1.trail = []
+                p2.trail = []
+            elif event.key == pygame.K_o:
+                overlay = not overlay
+            elif event.key == pygame.K_h:
+                show_ui = not show_ui
+            elif event.key == pygame.K_UP:
+                if spd_idx < len(speeds) - 1: spd_idx += 1
+            elif event.key == pygame.K_DOWN:
+                if spd_idx > 0: spd_idx -= 1
+            elif event.key == pygame.K_LEFT and not mercury:
+                amp = max(1.0, amp * 0.5)
+                p1.trail = []
+                p2.trail = []
+                sun = Body(0, 0, 0, 0, M, (255, 240, 100), "Star")
+                p1 = Body(R, 0, 0, V, m, (100, 180, 255), "Newton")
+                p2 = Body(R, 0, 0, V, m, (255, 80, 120), "Einstein")
+                t = 0.0
+                orbits = 0
+            elif event.key == pygame.K_RIGHT and not mercury:
+                amp = min(1000.0, amp * 2.0)
+                p1.trail = []
+                p2.trail = []
+                sun = Body(0, 0, 0, 0, M, (255, 240, 100), "Star")
+                p1 = Body(R, 0, 0, V, m, (100, 180, 255), "Newton")
+                p2 = Body(R, 0, 0, V, m, (255, 80, 120), "Einstein")
+                t = 0.0
+                orbits = 0
+            elif event.key == pygame.K_m:
+                mercury = True
+                p1.trail = []
+                p2.trail = []
+                sun = Body(0, 0, 0, 0, M, (255, 240, 100), "Star")
+                p1 = Body(R, 0, 0, V, m, (100, 180, 255), "Newton")
+                p2 = Body(R, 0, 0, V, m, (255, 80, 120), "Einstein")
+                t = 0.0
+                orbits = 0
+            elif event.key == pygame.K_v:
+                mercury = False
+                amp = 100.0
+                p1.trail = []
+                p2.trail = []
+                sun = Body(0, 0, 0, 0, M, (255, 240, 100), "Star")
+                p1 = Body(R, 0, 0, V, m, (100, 180, 255), "Newton")
+                p2 = Body(R, 0, 0, V, m, (255, 80, 120), "Einstein")
+                t = 0.0
+                orbits = 0
+            elif event.key == pygame.K_ESCAPE:
+                running = False
+
+    if not paused:
+        speed = speeds[spd_idx]
+        dt = dt_base * speed
+        steps = max(1, int(speed / 10))
+        step_dt = dt / steps
+        
+        for _ in range(steps):
+            dx1 = sun.x - p1.x
+            dy1 = sun.y - p1.y
+            d1 = math.sqrt(dx1**2 + dy1**2)
+            if d1 > 0:
+                f1_mag = G * sun.m * p1.m / (d1**2)
+                ux1 = dx1 / d1
+                uy1 = dy1 / d1
+                fx1 = f1_mag * ux1
+                fy1 = f1_mag * uy1
+                ax1 = fx1 / p1.m
+                ay1 = fy1 / p1.m
+                p1.vx += ax1 * step_dt
+                p1.vy += ay1 * step_dt
+            p1.x += p1.vx * step_dt
+            p1.y += p1.vy * step_dt
+            
+            dx2 = sun.x - p2.x
+            dy2 = sun.y - p2.y
+            d2 = math.sqrt(dx2**2 + dy2**2)
+            if d2 > 0:
+                f2_mag = G * sun.m * p2.m / (d2**2)
+                corr_mag = get_corr() * G * sun.m * p2.m / (d2**3)
+                ux2 = dx2 / d2
+                uy2 = dy2 / d2
+                fx2 = (f2_mag + corr_mag) * ux2
+                fy2 = (f2_mag + corr_mag) * uy2
+                ax2 = fx2 / p2.m
+                ay2 = fy2 / p2.m
+                p2.vx += ax2 * step_dt
+                p2.vy += ay2 * step_dt
+            p2.x += p2.vx * step_dt
+            p2.y += p2.vy * step_dt
+            
+            t += step_dt
+        
+        p1.trail.append((p1.x, p1.y))
+        p2.trail.append((p2.x, p2.y))
+        
+        dx = p2.x - sun.x
+        dy = p2.y - sun.y
+        d = math.sqrt(dx**2 + dy**2)
+        
+        if going_in and d > last_d:
+            going_in = False
+            ang = math.atan2(dy, dx)
+            
+            if init_angle is None:
+                init_angle = ang
+            elif last_angle is not None:
+                delta = ang - last_angle
+                while delta > math.pi: delta -= 2 * math.pi
+                while delta < -math.pi: delta += 2 * math.pi
+                angle += abs(delta)
+                orbits += 1
+            last_angle = ang
+        elif not going_in and d < last_d:
+            going_in = True
+        last_d = d
+        
+        if int(t * 10) % max(1, int(speed / 5)) == 0:
+            graph.update(t, p1, sun)
+
+    screen.fill((0, 0, 0))
+    
+    if overlay:
+        full = pygame.Rect(0, 0, 1600, 800)
+        draw_bg(screen, full)
+        draw_stars(screen, stars_left)
+        draw_grid(screen, 800)
+        
+        draw_star(screen, 800, 400, (255, 240, 100))
+        draw_body(screen, p1, 800, 400)
+        draw_body(screen, p2, 800, 400)
+        
+        sx1 = int(p1.x + 800)
+        sy1 = int(p1.y + 400)
+        sx2 = int(p2.x + 800)
+        sy2 = int(p2.y + 400)
+        pygame.draw.line(screen, (255, 255, 100), (sx1, sy1), (sx2, sy2), 2)
+        
+        ddx = p1.x - p2.x
+        ddy = p1.y - p2.y
+        div = math.sqrt(ddx**2 + ddy**2)
+        
+        if show_ui:
+            txt = f2.render(f"Divergence: {div:.1f} units", True, (255, 255, 100))
+            screen.blit(txt, (700, 750))
+            
+    else:
+        left = pygame.Rect(0, 0, 800, 800)
+        right = pygame.Rect(800, 0, 800, 800)
+        draw_bg(screen, left)
+        draw_bg(screen, right)
+        draw_stars(screen, stars_left)
+        
+        stars_r = [(x + 800, y, b) for x, y, b in stars_right]
+        draw_stars(screen, stars_r)
+        
+        draw_grid(screen, 400)
+        draw_grid(screen, 1200)
+        
+        draw_star(screen, 400, 400, (255, 240, 100))
+        draw_body(screen, p1, 400, 400)
+        
+        draw_star(screen, 1200, 400, (255, 240, 100))
+        draw_body(screen, p2, 1200, 400)
+        
+        if show_ui:
+            pygame.draw.line(screen, (160, 80, 255), (800, 100), (800, 720), 2)
+            
+            l1 = f3.render("NEWTONIAN MECHANICS", True, (100, 180, 255))
+            screen.blit(l1, (300, 740))
+            l2 = f4.render("F = GMm/r²", True, (230, 230, 230))
+            screen.blit(l2, (360, 765))
+            
+            l3 = f3.render("GENERAL RELATIVITY", True, (255, 80, 120))
+            screen.blit(l3, (1110, 740))
+            l4 = f4.render("Spacetime Curvature", True, (230, 230, 230))
+            screen.blit(l4, (1130, 765))
+
+    if show_ui:
+        txt1 = f1.render("PROJECT VULCAN", True, (255, 255, 255))
+        screen.blit(txt1, (650, 20))
+        
+        txt2 = f2.render("Newton to Einstein", True, (160, 80, 255))
+        screen.blit(txt2, (710, 60))
+        
+        draw_box(screen, 10, 110, 200, 370)
+        
+        screen.blit(f4.render("CONTROLS:", True, (255, 255, 255)), (20, 120))
+        screen.blit(f4.render("SPACE: Pause", True, (230, 230, 230)), (20, 145))
+        screen.blit(f4.render("R: Reset", True, (230, 230, 230)), (20, 170))
+        screen.blit(f4.render("C: Clear Trails", True, (230, 230, 230)), (20, 195))
+        screen.blit(f4.render("+/-: Time Speed", True, (230, 230, 230)), (20, 220))
+        screen.blit(f4.render("</>: Relativity", True, (230, 230, 230)), (20, 245))
+        screen.blit(f4.render("O: Overlay Mode", True, (230, 230, 230)), (20, 270))
+        screen.blit(f4.render("H: Hide UI", True, (230, 230, 230)), (20, 295))
+        screen.blit(f4.render("M: Real Mercury", True, (230, 230, 230)), (20, 320))
+        screen.blit(f4.render("V: Visual Mode", True, (230, 230, 230)), (20, 345))
+        screen.blit(f4.render("ESC: Exit", True, (230, 230, 230)), (20, 370))
+
+        cur = speeds[spd_idx]
+        col = (255, 255, 255) if cur == 1 else (255, 255, 0)
+        screen.blit(f2.render(f"TIME WARP: {cur}x", True, col), (20, 400))
+        
+        if mercury:
+            screen.blit(f4.render("MERCURY MODE: Realistic", True, (0, 255, 0)), (20, 440))
+            screen.blit(f4.render("(43 arcsec/century)", True, (0, 255, 0)), (20, 460))
+        else:
+            col2 = (255, 255, 0) if amp <= 10 else (255, 100, 100)
+            screen.blit(f4.render(f"VISUAL MODE: {amp:.1f}x", True, col2), (20, 440))
+            txt = "(Enhanced)" if amp <= 10 else "(Dramatic)"
+            screen.blit(f4.render(txt, True, col2), (20, 460))
+        
+        ke = 0.5 * p1.m * (p1.vx**2 + p1.vy**2)
+        dx = p1.x - sun.x
+        dy = p1.y - sun.y
+        d = math.sqrt(dx**2 + dy**2)
+        pe = -G * sun.m * p1.m / d if d > 0 else 0
+        e = ke + pe
+        
+        if mercury and t > 0:
+            arc = (math.degrees(angle) * 3600) * (100 * 365.25) / (t * 1.0)
+            ptxt = f"Precession: {arc:.1f} arcsec/cy"
+        else:
+            rot = math.degrees(angle) / 360.0
+            ptxt = f"Orbit Rotation: {rot:.2f} turns"
+            
+        draw_box(screen, 1305, 100, 285, 155)
+        
+        screen.blit(f4.render(f"Sim Time: {time_str(t)}", True, (255, 255, 255)), (1315, 110))
+        screen.blit(f4.render(f"Orbits: {orbits}", True, (255, 255, 255)), (1315, 132))
+        screen.blit(f4.render(ptxt, True, (160, 80, 255)), (1315, 154))
+        screen.blit(f4.render(f"Newton KE: {ke:.1f}", True, (255, 255, 255)), (1315, 176))
+        screen.blit(f4.render(f"Newton PE: {pe:.1f}", True, (255, 255, 255)), (1315, 198))
+        screen.blit(f4.render(f"Total Energy: {e:.1f}", True, (0, 255, 0)), (1315, 220))
+
+    if paused:
+        screen.blit(f1.render("PAUSED", True, (255, 255, 0)), (720, 400))
+
+    pygame.display.flip()
+    clock.tick(FPS)
+
+pygame.quit()
+plt.close('all')
+sys.exit()
